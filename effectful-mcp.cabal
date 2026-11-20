@@ -1,0 +1,73 @@
+cabal-version:   3.12
+name:            effectful-mcp
+version:         0.1.0.0
+synopsis:        Model Context Protocol servers in Effectful
+description:
+  A server of the Model Context Protocol (MCP), revision 2026-07-28, for
+  Effectful: declare tools as Eff actions, and serve them over stdio,
+  concurrently, with cancellation.
+
+homepage:        https://github.com/GuillaumedeVolpiano/effectful-mcp
+license:         BSD-3-Clause
+license-file:    LICENSE
+author:          GuillaumedeVolpiano
+maintainer:      xavier@wheredoibegin.fr
+category:        AI, Network, Control
+build-type:      Simple
+tested-with:     GHC ==9.12.4
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
+source-repository head
+  type:     git
+  location: https://github.com/GuillaumedeVolpiano/effectful-mcp.git
+
+common shared
+  default-language: GHC2024
+  default-extensions:
+    DuplicateRecordFields
+    NoFieldSelectors
+    OverloadedRecordDot
+    OverloadedStrings
+
+  ghc-options:
+    -Wall -Wcompat -Wredundant-constraints -Wmissing-deriving-strategies
+    -Wunused-packages
+
+library
+  import:          shared
+  hs-source-dirs:  src
+  exposed-modules:
+    Effectful.MCP.JsonRpc
+    Effectful.MCP.Server
+    Effectful.MCP.Tool
+
+  build-depends:
+    , aeson          ^>=2.3
+    , base           ^>=4.21
+    , bytestring     ^>=0.12
+    , containers     ^>=0.7
+    , effectful      ^>=2.7
+    , effectful-core ^>=2.7.1
+    , scientific     ^>=0.3
+    , streamly-core  ^>=0.3.3
+    , text           ^>=2.1
+
+test-suite effectful-mcp-test
+  import:         shared
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Main.hs
+  ghc-options:    -threaded
+  build-depends:
+    , aeson          ^>=2.3
+    , base           ^>=4.21
+    , bytestring     ^>=0.12
+    , effectful      ^>=2.7
+    , effectful-core ^>=2.7.1
+    , effectful-mcp
+    , stm            ^>=2.5
+    , tasty          ^>=1.5
+    , tasty-hunit    ^>=0.10
+    , text           ^>=2.1
