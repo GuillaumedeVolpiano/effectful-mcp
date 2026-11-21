@@ -57,6 +57,9 @@ tests =
           , testCase "a tool that throws gives an error result" $ do
               result <- expectResult =<< exchange (call 1 "fail" (object []))
               field "isError" result @?= Just (Bool True)
+          , testCase "an image result carries its media type and its bytes in base64" $
+              lookup "content" (toolResultValue (imageResult "image/png" "\137PNG"))
+                @?= Just (Aeson.toJSON [object ["type" .= ("image" :: Text), "data" .= ("iVBORw==" :: Text), "mimeType" .= ("image/png" :: Text)]])
           ]
       , testGroup
           "protocol errors"

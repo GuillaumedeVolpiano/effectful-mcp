@@ -44,15 +44,16 @@ library
     Effectful.MCP.Tool
 
   build-depends:
-    , aeson          ^>=2.3
-    , base           ^>=4.21
-    , bytestring     ^>=0.12
-    , containers     ^>=0.7
-    , effectful      ^>=2.7
-    , effectful-core ^>=2.7.1
-    , scientific     ^>=0.3
-    , streamly-core  ^>=0.3.3
-    , text           ^>=2.1
+    , aeson              ^>=2.3
+    , base               ^>=4.21
+    , base64-bytestring  ^>=1.2
+    , bytestring         ^>=0.12
+    , containers         ^>=0.7
+    , effectful          ^>=2.7
+    , effectful-core     ^>=2.7.1
+    , scientific         ^>=0.3
+    , streamly-core      ^>=0.3.3
+    , text               ^>=2.1
 
 test-suite effectful-mcp-test
   import:         shared

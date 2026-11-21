@@ -14,6 +14,7 @@ module Effectful.MCP.Tool
   , ToolResult (..)
   , Content (..)
   , textResult
+  , imageResult
   , structuredResult
   , errorResult
 
@@ -25,6 +26,8 @@ module Effectful.MCP.Tool
 import Data.Aeson (FromJSON, ToJSON (..), Value (..), object, (.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Types (parseEither, parseJSON)
+import Data.ByteString (ByteString)
+import Data.ByteString.Base64 qualified as Base64
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
@@ -88,12 +91,20 @@ data ToolResult = ToolResult
   }
   deriving stock (Eq, Show)
 
--- | Content of a result. Only text, for now.
-newtype Content = TextContent Text
+-- | Content of a result.
+data Content
+  = TextContent Text
+  | -- | An image: its media type, such as @image\/jpeg@, and its bytes.
+    -- They are sent in base64.
+    ImageContent Text ByteString
   deriving stock (Eq, Show)
 
 textResult :: Text -> ToolResult
 textResult text = ToolResult {content = [TextContent text], structuredContent = Nothing, isError = False}
+
+-- | An image, from its media type and its bytes.
+imageResult :: Text -> ByteString -> ToolResult
+imageResult mimeType bytes = ToolResult {content = [ImageContent mimeType bytes], structuredContent = Nothing, isError = False}
 
 -- | A structured result, also given as JSON text for clients that only
 -- read text, as the specification recommends.
@@ -138,4 +149,7 @@ toolResultValue ToolResult {content, structuredContent, isError} =
     <> catMaybes [("structuredContent" .=) <$> structuredContent]
     <> ["isError" .= True | isError]
   where
-    contentValue (TextContent text) = object ["type" .= ("text" :: Text), "text" .= text]
+    contentValue = \case
+      TextContent text -> object ["type" .= ("text" :: Text), "text" .= text]
+      ImageContent mimeType bytes ->
+        object ["type" .= ("image" :: Text), "data" .= decodeUtf8 (Base64.encode bytes), "mimeType" .= mimeType]
