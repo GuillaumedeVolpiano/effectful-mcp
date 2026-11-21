@@ -1,6 +1,6 @@
 # Revision history for effectful-mcp
 
-## 0.1.1.0 -- unreleased
+## 0.1.1.0 -- 2026-11-21
 
 * The server also speaks the earlier revisions of the protocol, to the
   clients that start with `initialize`: `handleLegacyRequest`,
