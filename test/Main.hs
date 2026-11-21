@@ -70,15 +70,79 @@ tests =
               response <- exchange (requestIn "2025-11-25" 1 "tools/list" [])
               expectError (-32022) response
               (field "error" response >>= field "data") @?= Just (object ["supported" .= ["2026-07-28" :: Text], "requested" .= ("2025-11-25" :: Text)])
-          , testCase "initialize, from an earlier revision" $ do
-              response <- exchange (line (object ["jsonrpc" .= ("2.0" :: Text), "id" .= (1 :: Int), "method" .= ("initialize" :: Text), "params" .= object ["protocolVersion" .= ("2025-11-25" :: Text)]]))
-              expectError (-32022) response
+          , testCase "a request of an earlier revision before any initialize" $
+              exchange (legacy 1 "tools/call" ["name" .= ("echo" :: Text), "arguments" .= object ["text" .= ("hello" :: Text)]]) >>= expectError (-32602)
           , testCase "unknown method" $ exchange (request 1 "prompts/list" []) >>= expectError (-32601)
           , testCase "malformed JSON, without id" $ do
               response <- exchange "{not json"
               expectError (-32700) response
               field "id" response @?= Nothing
           , testCase "batch" $ exchange "[]" >>= expectError (-32600)
+          ]
+      , testGroup
+          "earlier revisions"
+          [ testCase "initialize answers the version asked, the capabilities and the server" $ do
+              result <- expectResult =<< exchange (initialize 1 "2025-06-18")
+              result
+                @?= object
+                  [ "protocolVersion" .= ("2025-06-18" :: Text)
+                  , "capabilities" .= object ["tools" .= object ["listChanged" .= False]]
+                  , "serverInfo" .= object ["name" .= ("test-server" :: Text), "version" .= ("1.0" :: Text)]
+                  ]
+          , testCase "initialize answers its latest earlier revision to a version it does not know" $ do
+              answers <- mapM (\asked -> (field "protocolVersion" =<<) . field "result" <$> exchange (initialize 1 asked)) ["2025-11-25", "2024-11-05", "1900-01-01", "2026-07-28"]
+              answers @?= map (Just . String) ["2025-11-25", "2024-11-05", "2025-11-25", "2025-11-25"]
+          , testCase "after initialize, the tools are listed and called as those revisions do" $ do
+              responses <- session $ \push pull -> do
+                push (initialize 1 "2025-11-25")
+                _ <- pull
+                push (line (object ["jsonrpc" .= ("2.0" :: Text), "method" .= ("notifications/initialized" :: Text)]))
+                push (legacy 2 "tools/list" [])
+                listed <- pull
+                push (legacy 3 "tools/call" ["name" .= ("add" :: Text), "arguments" .= object ["a" .= (2 :: Int), "b" .= (3 :: Int)]])
+                called <- pull
+                push (legacy 4 "ping" [])
+                pinged <- pull
+                pure [listed, called, pinged]
+              case responses of
+                [listed, called, pinged] -> do
+                  result <- expectResult listed
+                  case result of
+                    Object fields -> do
+                      KeyMap.keys fields @?= ["tools"]
+                      fmap (\case Array tools -> map (field "name") (foldr (:) [] tools); _ -> []) (field "tools" result)
+                        @?= Just (map (Just . String) ["echo", "add", "fail", "wait"])
+                    other -> assertFailure ("not an object: " <> show other)
+                  sum' <- expectResult called
+                  sum'
+                    @?= object
+                      [ "content" .= [object ["type" .= ("text" :: Text), "text" .= ("{\"sum\":5}" :: Text)]]
+                      , "structuredContent" .= object ["sum" .= (5 :: Int)]
+                      ]
+                  field "result" pinged @?= Just (object [])
+                other -> assertFailure ("expected three answers, got " <> show other)
+          , testCase "after initialize, errors are those of the protocol" $ do
+              responses <- session $ \push pull -> do
+                push (initialize 1 "2025-11-25")
+                _ <- pull
+                push (legacy 2 "tools/call" ["name" .= ("nope" :: Text)])
+                unknownTool <- pull
+                push (legacy 3 "prompts/list" [])
+                unknownMethod <- pull
+                push (legacy 4 "tools/list" ["cursor" .= ("next" :: Text)])
+                cursor <- pull
+                pure [unknownTool, unknownMethod, cursor]
+              map (\response -> field "error" response >>= field "code") responses @?= map (Just . Number) [-32602, -32601, -32602]
+          , testCase "both eras are served on one connection" $ do
+              responses <- session $ \push pull -> do
+                push (initialize 1 "2025-11-25")
+                _ <- pull
+                push (request 2 "tools/list" [])
+                modern <- pull
+                push (legacy 3 "tools/list" [])
+                earlier <- pull
+                pure [modern, earlier]
+              map (\response -> field "result" response >>= field "resultType") responses @?= [Just (String "complete"), Nothing]
           ]
       , testGroup
           "serving"
@@ -214,6 +278,16 @@ meta version =
 
 request :: Int -> Text -> [(Aeson.Key, Value)] -> ByteString
 request = requestIn "2026-07-28"
+
+-- | A request as the earlier revisions write it: without the version.
+legacy :: Int -> Text -> [(Aeson.Key, Value)] -> ByteString
+legacy requestId method params =
+  line (object ["jsonrpc" .= ("2.0" :: Text), "id" .= requestId, "method" .= method, "params" .= object params])
+
+-- | The handshake of the earlier revisions, asking for a version.
+initialize :: Int -> Text -> ByteString
+initialize requestId asked =
+  legacy requestId "initialize" ["protocolVersion" .= asked, "capabilities" .= object [], "clientInfo" .= object ["name" .= ("test-client" :: Text), "version" .= ("0" :: Text)]]
 
 requestIn :: Text -> Int -> Text -> [(Aeson.Key, Value)] -> ByteString
 requestIn version requestId method params =

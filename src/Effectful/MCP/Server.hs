@@ -3,14 +3,22 @@
 -- Description : An MCP server of tools, over stdio
 -- License     : BSD-3-Clause
 --
--- A server of the Model Context Protocol, revision 2026-07-28, which offers
--- tools. The protocol is stateless: every request carries its protocol
--- version and the capabilities of the client, and is served on its own.
+-- A server of the Model Context Protocol which offers tools, for clients
+-- of two eras, as revision 2026-07-28 allows a server to be.
 --
--- The server answers @server/discover@, @tools/list@ and @tools/call@. A
--- request in another version gets an @UnsupportedProtocolVersionError@;
--- so does @initialize@, the handshake of earlier revisions, which this
--- server does not speak.
+-- * Revision 2026-07-28 is stateless: every request carries its protocol
+--   version and the capabilities of the client in its @_meta@, and is
+--   served on its own. The server answers @server/discover@, @tools/list@
+--   and @tools/call@; a request in another version gets an
+--   @UnsupportedProtocolVersionError@.
+--
+-- * Earlier revisions (2025-11-25 and before) start with @initialize@.
+--   That request selects their semantics for the connection: from then
+--   on, requests without the @_meta@ of the new revision are served as
+--   those revisions describe (@tools/list@, @tools/call@, @ping@).
+--
+-- Both are served at once on one connection: what a request carries tells
+-- which it is.
 --
 -- Requests are served concurrently, each in a thread of its own, as
 -- Effectful forks threads: a tool that changes a local @State@ does so in
@@ -23,11 +31,13 @@ module Effectful.MCP.Server
   , Implementation (..)
   , implementation
   , protocolVersion
+  , legacyVersions
 
     -- * Serving
   , serveStdio
   , serve
   , handleRequest
+  , handleLegacyRequest
   ) where
 
 import Control.Monad (forM_, void)
@@ -40,7 +50,7 @@ import Data.ByteString qualified as ByteString
 import Data.ByteString.Char8 qualified as Char8
 import Data.List (find)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Effectful
@@ -55,9 +65,15 @@ import Streamly.Data.Fold qualified as Fold
 import Streamly.Data.Stream qualified as Stream
 import System.IO qualified as IO
 
--- | The revision of the protocol this server speaks.
+-- | The stateless revision of the protocol this server speaks.
 protocolVersion :: Text
 protocolVersion = "2026-07-28"
+
+-- | The earlier revisions this server speaks to a client that starts with
+-- @initialize@, the latest first. For a server that only offers tools,
+-- they differ by fields that older clients leave aside.
+legacyVersions :: [Text]
+legacyVersions = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 
 -- | The name and version of a server, as it reports them.
 data Implementation = Implementation
@@ -129,23 +145,32 @@ serve
 serve config readLine writeLine = do
   lock <- newMVar ()
   running <- newTVarIO Map.empty
+  -- Whether a client has selected the earlier revisions with initialize.
+  legacy <- newTVarIO False
   let send line = withMVar lock (const (writeLine line))
-  Stream.fold (Fold.drainMapM (dispatch running send)) $
+  Stream.fold (Fold.drainMapM (dispatch legacy running send)) $
     Stream.filter (not . Char8.all (`elem` (" \t" :: String))) (Stream.unfoldrM (const (fmap (,()) <$> readLine)) ())
   shutDown running
   where
-    dispatch running send line = case decodeIncoming line of
-      Request requestId method params -> start running send requestId method params
+    dispatch legacy running send line = case decodeIncoming line of
+      Request requestId method params -> do
+        -- The era is settled before the request starts, so that what
+        -- follows an initialize is read as it should be.
+        era <- atomically $ do
+          if method == "initialize" then writeTVar legacy True else pure ()
+          selected <- readTVar legacy
+          pure (if selected && not (carriesModernMeta params) then handleLegacyRequest else handleRequest)
+        start running send requestId (era config method params)
       Notification "notifications/cancelled" params ->
         forM_ (KeyMap.lookup "requestId" params >>= parseMaybe Aeson.parseJSON) (stop running)
       Notification _ _ -> pure ()
       Response -> pure ()
       Invalid requestId err -> send (encodeError requestId err)
 
-    start running send requestId method params = do
+    start running send requestId answerRequest = do
       atomically (modifyTVar' running (Map.insert requestId (Running Nothing)))
       worker <- async $ do
-        outcome <- trySync (handleRequest config method params)
+        outcome <- trySync answerRequest
         let answer = case outcome of
               Right (Right result) -> encodeResult requestId result
               Right (Left err) -> encodeError (Just requestId) err
@@ -174,11 +199,42 @@ serve config readLine writeLine = do
 
     runningWorkers current = [worker | Running (Just worker) <- Map.elems current]
 
--- | Answer one request: a result, or a protocol error.
+-- | Whether a request carries the protocol version of the stateless
+-- revision, which makes it one of that revision whatever came before.
+carriesModernMeta :: Object -> Bool
+carriesModernMeta params = case KeyMap.lookup "_meta" params of
+  Just (Object meta) -> KeyMap.member "io.modelcontextprotocol/protocolVersion" meta
+  _ -> False
+
+-- | Answer one request of the earlier revisions: a result, or a protocol
+-- error. @initialize@ answers the version asked when it is one of
+-- 'legacyVersions', and the latest of them otherwise, which the client
+-- takes or leaves.
+handleLegacyRequest :: ServerConfig es -> Text -> Object -> Eff es (Either ErrorObject Value)
+handleLegacyRequest config method params = case method of
+  "initialize" ->
+    pure . Right . object $
+      [ "protocolVersion" .= negotiated
+      , "capabilities" .= object ["tools" .= object ["listChanged" .= False]]
+      , "serverInfo" .= config.info
+      ]
+        <> catMaybes [("instructions" .=) <$> config.instructions]
+  "ping" -> pure (Right (object []))
+  "tools/list"
+    | KeyMap.member "cursor" params -> pure (Left (invalidParams "Unknown cursor: the list has one page"))
+    | otherwise -> pure (Right (object ["tools" .= map toolDefinition config.tools]))
+  "tools/call" -> callToolWith object config params
+  _ -> pure (Left (methodNotFound ("Method not found: " <> method)))
+  where
+    requested = stringField "protocolVersion" params
+    negotiated = if requested `elem` legacyVersions then requested else maybe protocolVersion id (listToMaybe legacyVersions)
+
+-- | Answer one request of the stateless revision: a result, or a protocol
+-- error. An @initialize@, which belongs to the earlier revisions, is
+-- answered as 'handleLegacyRequest' does.
 handleRequest :: ServerConfig es -> Text -> Object -> Eff es (Either ErrorObject Value)
 handleRequest config method params
-  | method == "initialize" =
-      pure (Left (unsupportedProtocolVersion [protocolVersion] (stringField "protocolVersion" params)))
+  | method == "initialize" = handleLegacyRequest config method params
   | otherwise = case checkMeta params of
       Left err -> pure (Left err)
       Right () -> case method of
@@ -192,11 +248,12 @@ handleRequest config method params
         "tools/list"
           | KeyMap.member "cursor" params -> pure (Left (invalidParams "Unknown cursor: the list has one page"))
           | otherwise -> pure . Right . complete config $ ("tools" .= map toolDefinition config.tools) : cacheable config
-        "tools/call" -> callTool config params
+        "tools/call" -> callToolWith (complete config) config params
         _ -> pure (Left (methodNotFound ("Method not found: " <> method)))
 
-callTool :: ServerConfig es -> Object -> Eff es (Either ErrorObject Value)
-callTool config params = case KeyMap.lookup "name" params of
+-- | Call a tool, and wrap the fields of its result as a revision wants.
+callToolWith :: ([(Aeson.Key, Value)] -> Value) -> ServerConfig es -> Object -> Eff es (Either ErrorObject Value)
+callToolWith wrap config params = case KeyMap.lookup "name" params of
   Just (String toolName) -> case find (\candidate -> candidate.name == toolName) config.tools of
     Nothing -> pure (Left (invalidParams ("Unknown tool: " <> toolName)))
     Just found -> case KeyMap.lookup "arguments" params of
@@ -208,7 +265,7 @@ callTool config params = case KeyMap.lookup "name" params of
     run found arguments = do
       outcome <- trySync (found.call arguments)
       let result = either (\exception -> errorResult ("Internal error: " <> Text.pack (show exception))) id outcome
-      pure (Right (complete config (toolResultValue result)))
+      pure (Right (wrap (toolResultValue result)))
 
 -- | Check the fields every request must carry, and the version.
 checkMeta :: Object -> Either ErrorObject ()
@@ -219,7 +276,7 @@ checkMeta params = case KeyMap.lookup "_meta" params of
       | otherwise -> Left (unsupportedProtocolVersion [protocolVersion] requested)
     (Just (String _), _) -> Left (invalidParams "Missing _meta.io.modelcontextprotocol/clientCapabilities")
     _ -> Left (invalidParams "Missing _meta.io.modelcontextprotocol/protocolVersion")
-  _ -> Left (invalidParams "Missing _meta: this server speaks revision 2026-07-28, where every request carries its protocol version")
+  _ -> Left (invalidParams "Missing _meta: in revision 2026-07-28 every request carries its protocol version; the earlier revisions start with initialize")
 
 complete :: ServerConfig es -> [(Aeson.Key, Value)] -> Value
 complete config fields =

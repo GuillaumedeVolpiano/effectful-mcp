@@ -1,6 +1,6 @@
 cabal-version:   3.12
 name:            effectful-mcp
-version:         0.1.0.0
+version:         0.1.1.0
 synopsis:        Model Context Protocol servers in Effectful
 description:
   A server of the Model Context Protocol (MCP), revision 2026-07-28, for

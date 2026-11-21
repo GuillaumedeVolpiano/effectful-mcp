@@ -1,7 +1,7 @@
 # effectful-mcp
 
 A server of the [Model Context Protocol](https://modelcontextprotocol.io)
-(MCP), revision 2026-07-28, for
+(MCP), revision 2026-07-28 and the earlier ones, for
 [Effectful](https://hackage.haskell.org/package/effectful): declare tools as
 `Eff` actions, and serve them over stdio.
 
@@ -37,12 +37,16 @@ main =
 
 ## What it does
 
-- Revision 2026-07-28 only: every request carries its protocol version and
-  the capabilities of the client in `_meta`, and is served on its own.
-  `initialize`, the handshake of earlier revisions, gets an
-  `UnsupportedProtocolVersionError` naming the version served. Clients that
-  speak both eras, such as current versions of Claude Code, probe with
-  `server/discover` first and use the modern revision.
+- Revision 2026-07-28: every request carries its protocol version and the
+  capabilities of the client in `_meta`, and is served on its own. Clients
+  that speak both eras, such as current versions of Claude Code, probe
+  with `server/discover` first and use this revision.
+- The earlier revisions (2025-11-25 and before): `initialize` selects them
+  for the connection, and `tools/list`, `tools/call` and `ping` are then
+  answered as they describe. Clients that only know them, such as the
+  Claude desktop application at the time of writing, are served this way.
+- Both at once on one connection, as revision 2026-07-28 allows: what a
+  request carries tells which it is.
 - `server/discover`, `tools/list` (in a fixed order, with cache hints) and
   `tools/call`.
 - Tool failures, including arguments that do not decode, come back as
