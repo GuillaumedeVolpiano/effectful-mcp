@@ -114,6 +114,10 @@ encodeError requestId err =
   LazyByteString.toStrict . Aeson.encode . object $
     ["jsonrpc" .= ("2.0" :: Text), "error" .= err] <> catMaybes [("id" .=) <$> requestId]
 
+-- | The errors JSON-RPC defines, each with its code and a message: the
+-- input is not JSON (-32700), is not a request (-32600), names a method
+-- that does not exist (-32601), has parameters that do not fit (-32602),
+-- or the server failed (-32603).
 parseError, invalidRequest, methodNotFound, invalidParams, internalError :: Text -> ErrorObject
 parseError message = ErrorObject {code = -32700, message, errorData = Nothing}
 invalidRequest message = ErrorObject {code = -32600, message, errorData = Nothing}

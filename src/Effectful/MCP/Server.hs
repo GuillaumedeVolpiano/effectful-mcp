@@ -93,6 +93,8 @@ instance ToJSON Implementation where
   toJSON Implementation {name, version, title} =
     object (["name" .= name, "version" .= version] <> catMaybes [("title" .=) <$> title])
 
+-- | What a server is: who it says it is, what it offers and how it
+-- behaves. Start from 'serverConfig'.
 data ServerConfig es = ServerConfig
   { info :: Implementation
   , instructions :: Maybe Text

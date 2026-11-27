@@ -71,6 +71,7 @@ data ToolAnnotations = ToolAnnotations
   }
   deriving stock (Eq, Show)
 
+-- | No hint at all.
 noAnnotations :: ToolAnnotations
 noAnnotations = ToolAnnotations Nothing Nothing Nothing Nothing
 
@@ -99,6 +100,7 @@ data Content
     ImageContent Text ByteString
   deriving stock (Eq, Show)
 
+-- | A text.
 textResult :: Text -> ToolResult
 textResult text = ToolResult {content = [TextContent text], structuredContent = Nothing, isError = False}
 
