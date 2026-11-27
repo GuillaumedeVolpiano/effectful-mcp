@@ -84,7 +84,7 @@ data Implementation = Implementation
   deriving stock (Eq, Show)
 
 -- | A name and a version, without title. Field names such as @name@ are
--- shared with 'Tool', which makes record syntax ambiguous without
+-- shared with t'Tool', which makes record syntax ambiguous without
 -- @DuplicateRecordFields@.
 implementation :: Text -> Text -> Implementation
 implementation name version = Implementation {name, version, title = Nothing}
