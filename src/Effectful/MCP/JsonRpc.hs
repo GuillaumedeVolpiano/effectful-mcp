@@ -25,16 +25,16 @@ module Effectful.MCP.JsonRpc
   , unsupportedProtocolVersion
   ) where
 
-import Data.Aeson (FromJSON (..), Object, ToJSON (..), Value (..), object, (.=))
-import Data.Aeson qualified as Aeson
-import Data.Aeson.KeyMap qualified as KeyMap
+import Data.Aeson (FromJSON (..), Object, ToJSON (..), Value (..),
+                   eitherDecodeStrict, encode, object, (.=))
+import Data.Aeson.KeyMap (empty, member)
+import Data.Aeson.KeyMap qualified as JK (lookup)
 import Data.Aeson.Types (parseMaybe)
 import Data.ByteString (ByteString)
-import Data.ByteString.Lazy qualified as LazyByteString
+import Data.ByteString.Lazy (toStrict)
 import Data.Maybe (catMaybes)
 import Data.Scientific (floatingOrInteger)
-import Data.Text (Text)
-import Data.Text qualified as Text
+import Data.Text (Text, pack)
 
 -- | A request identifier: a string or an integer.
 data RequestId = RequestIdText Text | RequestIdNumber Integer
@@ -66,27 +66,27 @@ data Incoming
 
 -- | Read one message.
 decodeIncoming :: ByteString -> Incoming
-decodeIncoming bytes = case Aeson.eitherDecodeStrict bytes of
-  Left err -> Invalid Nothing (parseError ("Parse error: " <> Text.pack err))
+decodeIncoming bytes = case eitherDecodeStrict bytes of
+  Left err -> Invalid Nothing (parseError ("Parse error: " <> pack err))
   Right (Object fields) -> fromObject fields
   Right (Array _) -> Invalid Nothing (invalidRequest "Batches are not supported")
   Right _ -> Invalid Nothing (invalidRequest "A message is a JSON object")
   where
     fromObject fields
-      | KeyMap.lookup "jsonrpc" fields /= Just (String "2.0") = Invalid identifier (invalidRequest "jsonrpc must be \"2.0\"")
-      | otherwise = case (KeyMap.lookup "method" fields, KeyMap.lookup "id" fields) of
+      | JK.lookup "jsonrpc" fields /= Just (String "2.0") = Invalid identifier (invalidRequest "jsonrpc must be \"2.0\"")
+      | otherwise = case (JK.lookup "method" fields, JK.lookup "id" fields) of
           (Just (String method), Nothing) -> withParams (Notification method)
           (Just (String method), Just _) -> case identifier of
             Just requestId -> withParams (Request requestId method)
             Nothing -> Invalid Nothing (invalidRequest "A request id is a string or an integer, never null")
           (Just _, _) -> Invalid identifier (invalidRequest "method must be a string")
           (Nothing, _)
-            | KeyMap.member "result" fields || KeyMap.member "error" fields -> Response
+            | member "result" fields || member "error" fields -> Response
             | otherwise -> Invalid identifier (invalidRequest "No method")
       where
-        identifier = KeyMap.lookup "id" fields >>= parseMaybe parseJSON
-        withParams build = case KeyMap.lookup "params" fields of
-          Nothing -> build KeyMap.empty
+        identifier = JK.lookup "id" fields >>= parseMaybe parseJSON
+        withParams build = case JK.lookup "params" fields of
+          Nothing -> build empty
           Just (Object params) -> build params
           Just _ -> Invalid identifier (invalidParams "params must be an object")
 
@@ -105,13 +105,13 @@ instance ToJSON ErrorObject where
 -- | A result response, as one line without its end.
 encodeResult :: RequestId -> Value -> ByteString
 encodeResult requestId result =
-  LazyByteString.toStrict (Aeson.encode (object ["jsonrpc" .= ("2.0" :: Text), "id" .= requestId, "result" .= result]))
+  toStrict (encode (object ["jsonrpc" .= ("2.0" :: Text), "id" .= requestId, "result" .= result]))
 
 -- | An error response, as one line without its end. The identifier is
 -- left out when it could not be read.
 encodeError :: Maybe RequestId -> ErrorObject -> ByteString
 encodeError requestId err =
-  LazyByteString.toStrict . Aeson.encode . object $
+  toStrict . encode . object $
     ["jsonrpc" .= ("2.0" :: Text), "error" .= err] <> catMaybes [("id" .=) <$> requestId]
 
 -- | The errors JSON-RPC defines, each with its code and a message: the

@@ -23,17 +23,16 @@ module Effectful.MCP.Tool
   , toolResultValue
   ) where
 
-import Data.Aeson (FromJSON, ToJSON (..), Value (..), object, (.=))
-import Data.Aeson qualified as Aeson
+import Data.Aeson (FromJSON, Key, ToJSON (..), Value (..), object, (.=))
+import Data.Aeson qualified as J (encode)
 import Data.Aeson.Types (parseEither, parseJSON)
 import Data.ByteString (ByteString)
-import Data.ByteString.Base64 qualified as Base64
-import Data.ByteString.Lazy qualified as LazyByteString
+import Data.ByteString.Base64 qualified as B64 (encode)
+import Data.ByteString.Lazy (toStrict)
 import Data.Maybe (catMaybes)
-import Data.Text (Text)
-import Data.Text qualified as Text
+import Data.Text (Text, pack)
 import Data.Text.Encoding (decodeUtf8)
-import Effectful
+import Effectful (Eff)
 
 -- | A tool: what the client lists, and what runs when it is called.
 data Tool es = Tool
@@ -81,7 +80,7 @@ noAnnotations = ToolAnnotations Nothing Nothing Nothing Nothing
 withArguments :: FromJSON a => (a -> Eff es ToolResult) -> Value -> Eff es ToolResult
 withArguments run arguments = case parseEither parseJSON arguments of
   Right decoded -> run decoded
-  Left err -> pure (errorResult ("Invalid arguments: " <> Text.pack err))
+  Left err -> pure (errorResult ("Invalid arguments: " <> pack err))
 
 -- | What a call returns.
 data ToolResult = ToolResult
@@ -113,7 +112,7 @@ imageResult mimeType bytes = ToolResult {content = [ImageContent mimeType bytes]
 structuredResult :: ToJSON a => a -> ToolResult
 structuredResult value =
   ToolResult
-    { content = [TextContent (decodeUtf8 (LazyByteString.toStrict (Aeson.encode value)))]
+    { content = [TextContent (decodeUtf8 (toStrict (J.encode value)))]
     , structuredContent = Just (toJSON value)
     , isError = False
     }
@@ -145,7 +144,7 @@ annotationsValue ToolAnnotations {readOnlyHint, destructiveHint, idempotentHint,
     hints -> Just (object hints)
 
 -- | The fields of a @tools/call@ result, without @resultType@ and @_meta@.
-toolResultValue :: ToolResult -> [(Aeson.Key, Value)]
+toolResultValue :: ToolResult -> [(Key, Value)]
 toolResultValue ToolResult {content, structuredContent, isError} =
   ["content" .= map contentValue content]
     <> catMaybes [("structuredContent" .=) <$> structuredContent]
@@ -154,4 +153,4 @@ toolResultValue ToolResult {content, structuredContent, isError} =
     contentValue = \case
       TextContent text -> object ["type" .= ("text" :: Text), "text" .= text]
       ImageContent mimeType bytes ->
-        object ["type" .= ("image" :: Text), "data" .= decodeUtf8 (Base64.encode bytes), "mimeType" .= mimeType]
+        object ["type" .= ("image" :: Text), "data" .= decodeUtf8 (B64.encode bytes), "mimeType" .= mimeType]

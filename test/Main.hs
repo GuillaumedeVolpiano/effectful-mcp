@@ -1,19 +1,26 @@
 -- | The server, fed and read through in-memory queues.
 module Main (main) where
 
-import Control.Concurrent.STM
-import Data.Aeson (FromJSON (..), Value (..), object, withObject, (.:), (.=))
-import Data.Aeson qualified as Aeson
-import Data.Aeson.KeyMap qualified as KeyMap
+import Control.Concurrent.STM (TMVar, TVar, atomically, flushTQueue,
+                               newEmptyTMVarIO, newTQueueIO, newTVarIO,
+                               putTMVar, readTMVar, readTQueue, readTVarIO,
+                               tryReadTMVar, writeTQueue, writeTVar)
+import Data.Aeson (FromJSON (..), Key, ToJSON (toJSON), Value (..),
+                   decodeStrict, encode, object, withObject, (.:), (.=))
+import Data.Aeson.KeyMap (keys)
+import Data.Aeson.KeyMap qualified as JK (lookup)
 import Data.ByteString (ByteString)
-import Data.ByteString.Lazy qualified as LazyByteString
+import Data.ByteString.Lazy (toStrict)
 import Data.Text (Text)
-import Effectful
+import Effectful (IOE, MonadIO (liftIO), runEff)
 import Effectful.Concurrent (Concurrent, runConcurrent)
 import Effectful.Concurrent.Async (wait, withAsync)
 import Effectful.Exception (finally)
-import Effectful.MCP.Server
-import Effectful.MCP.Tool
+import Effectful.MCP.Server (Implementation (Implementation, name, title, version),
+                             ServerConfig (shutdownGrace), serve, serverConfig)
+import Effectful.MCP.Tool (Tool (annotations), ToolAnnotations (readOnlyHint),
+                           imageResult, noAnnotations, structuredResult,
+                           textResult, tool, toolResultValue, withArguments)
 import Test.Tasty (TestTree, defaultMain, localOption, mkTimeout, testGroup)
 import Test.Tasty.HUnit (Assertion, assertFailure, testCase, (@?=))
 
@@ -30,7 +37,7 @@ tests =
           [ testCase "server/discover" $ do
               result <- expectResult =<< exchange (request 1 "server/discover" [])
               field "resultType" result @?= Just (String "complete")
-              field "supportedVersions" result @?= Just (Aeson.toJSON ["2026-07-28" :: Text])
+              field "supportedVersions" result @?= Just (toJSON ["2026-07-28" :: Text])
               field "capabilities" result @?= Just (object ["tools" .= object []])
               field "ttlMs" result @?= Just (Number 300000)
               field "cacheScope" result @?= Just (String "public")
@@ -45,12 +52,12 @@ tests =
               field "ttlMs" result @?= Just (Number 300000)
           , testCase "tools/call returns text" $ do
               result <- expectResult =<< exchange (call 1 "echo" (object ["text" .= ("hello" :: Text)]))
-              field "content" result @?= Just (Aeson.toJSON [object ["type" .= ("text" :: Text), "text" .= ("hello" :: Text)]])
+              field "content" result @?= Just (toJSON [object ["type" .= ("text" :: Text), "text" .= ("hello" :: Text)]])
               field "isError" result @?= Nothing
           , testCase "tools/call returns structured content, also as text" $ do
               result <- expectResult =<< exchange (call 1 "add" (object ["a" .= (2 :: Int), "b" .= (3 :: Int)]))
               field "structuredContent" result @?= Just (object ["sum" .= (5 :: Int)])
-              field "content" result @?= Just (Aeson.toJSON [object ["type" .= ("text" :: Text), "text" .= ("{\"sum\":5}" :: Text)]])
+              field "content" result @?= Just (toJSON [object ["type" .= ("text" :: Text), "text" .= ("{\"sum\":5}" :: Text)]])
           , testCase "arguments that do not decode give an error result" $ do
               result <- expectResult =<< exchange (call 1 "add" (object ["a" .= ("two" :: Text)]))
               field "isError" result @?= Just (Bool True)
@@ -59,7 +66,7 @@ tests =
               field "isError" result @?= Just (Bool True)
           , testCase "an image result carries its media type and its bytes in base64" $
               lookup "content" (toolResultValue (imageResult "image/png" "\137PNG"))
-                @?= Just (Aeson.toJSON [object ["type" .= ("image" :: Text), "data" .= ("iVBORw==" :: Text), "mimeType" .= ("image/png" :: Text)]])
+                @?= Just (toJSON [object ["type" .= ("image" :: Text), "data" .= ("iVBORw==" :: Text), "mimeType" .= ("image/png" :: Text)]])
           ]
       , testGroup
           "protocol errors"
@@ -109,7 +116,7 @@ tests =
                   result <- expectResult listed
                   case result of
                     Object fields -> do
-                      KeyMap.keys fields @?= ["tools"]
+                      keys fields @?= ["tools"]
                       fmap (\case Array tools -> map (field "name") (foldr (:) [] tools); _ -> []) (field "tools" result)
                         @?= Just (map (Just . String) ["echo", "add", "fail", "wait"])
                     other -> assertFailure ("not an object: " <> show other)
@@ -263,10 +270,10 @@ sessionWith gate script = do
       pure responses
 
 decode :: ByteString -> Value
-decode bytes = maybe (error ("not JSON: " <> show bytes)) id (Aeson.decodeStrict bytes)
+decode bytes = maybe (error ("not JSON: " <> show bytes)) id (decodeStrict bytes)
 
 line :: Value -> ByteString
-line = LazyByteString.toStrict . Aeson.encode
+line = toStrict . encode
 
 meta :: Text -> Value
 meta version =
@@ -276,11 +283,11 @@ meta version =
     , "io.modelcontextprotocol/clientInfo" .= object ["name" .= ("test" :: Text), "version" .= ("0" :: Text)]
     ]
 
-request :: Int -> Text -> [(Aeson.Key, Value)] -> ByteString
+request :: Int -> Text -> [(Key, Value)] -> ByteString
 request = requestIn "2026-07-28"
 
 -- | A request as the earlier revisions write it: without the version.
-legacy :: Int -> Text -> [(Aeson.Key, Value)] -> ByteString
+legacy :: Int -> Text -> [(Key, Value)] -> ByteString
 legacy requestId method params =
   line (object ["jsonrpc" .= ("2.0" :: Text), "id" .= requestId, "method" .= method, "params" .= object params])
 
@@ -289,16 +296,16 @@ initialize :: Int -> Text -> ByteString
 initialize requestId asked =
   legacy requestId "initialize" ["protocolVersion" .= asked, "capabilities" .= object [], "clientInfo" .= object ["name" .= ("test-client" :: Text), "version" .= ("0" :: Text)]]
 
-requestIn :: Text -> Int -> Text -> [(Aeson.Key, Value)] -> ByteString
+requestIn :: Text -> Int -> Text -> [(Key, Value)] -> ByteString
 requestIn version requestId method params =
   line (object ["jsonrpc" .= ("2.0" :: Text), "id" .= requestId, "method" .= method, "params" .= object (("_meta" .= meta version) : params)])
 
 call :: Int -> Text -> Value -> ByteString
 call requestId name arguments = request requestId "tools/call" ["name" .= name, "arguments" .= arguments]
 
-field :: Aeson.Key -> Value -> Maybe Value
+field :: Key -> Value -> Maybe Value
 field key = \case
-  Object fields -> KeyMap.lookup key fields
+  Object fields -> JK.lookup key fields
   _ -> Nothing
 
 expectResult :: Value -> IO Value

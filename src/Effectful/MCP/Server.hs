@@ -41,29 +41,37 @@ module Effectful.MCP.Server
   ) where
 
 import Control.Monad (forM_, void)
-import Data.Aeson (Object, ToJSON (..), Value (..), object, (.=))
-import Data.Aeson qualified as Aeson
-import Data.Aeson.KeyMap qualified as KeyMap
+import Data.Aeson (FromJSON (parseJSON), Key, Object, ToJSON (..), Value (..),
+                   object, (.=))
+import Data.Aeson.KeyMap qualified as JK (empty, lookup, member)
 import Data.Aeson.Types (parseMaybe)
 import Data.ByteString (ByteString)
-import Data.ByteString qualified as ByteString
-import Data.ByteString.Char8 qualified as Char8
+import Data.ByteString qualified as BS (init)
+import Data.ByteString.Char8 (hGetLine, hPutStrLn, isSuffixOf)
+import Data.ByteString.Char8 qualified as BS8 (all)
 import Data.List (find)
-import Data.Map.Strict qualified as Map
+import Data.Map.Strict (adjust, delete, elems, insert)
+import Data.Map.Strict qualified as M (empty, lookup, member)
 import Data.Maybe (catMaybes, listToMaybe)
-import Data.Text (Text)
-import Data.Text qualified as Text
-import Effectful
+import Data.Text (Text, pack)
+import Effectful (Eff, IOE, MonadIO (liftIO), type (:>))
 import Effectful.Concurrent (Concurrent, threadDelay)
 import Effectful.Concurrent.Async (Async, async, cancel, race, waitCatch)
 import Effectful.Concurrent.MVar (newMVar, withMVar)
-import Effectful.Concurrent.STM (atomically, modifyTVar', newTVarIO, readTVar, readTVarIO, writeTVar)
+import Effectful.Concurrent.STM (atomically, modifyTVar', newTVarIO, readTVar,
+                                 readTVarIO, writeTVar)
 import Effectful.Exception (trySync)
-import Effectful.MCP.JsonRpc
-import Effectful.MCP.Tool (Tool (..), errorResult, toolDefinition, toolResultValue)
-import Streamly.Data.Fold qualified as Fold
-import Streamly.Data.Stream qualified as Stream
-import System.IO qualified as IO
+import Effectful.MCP.JsonRpc (ErrorObject,
+                              Incoming (Invalid, Notification, Request, Response),
+                              decodeIncoming, encodeError, encodeResult,
+                              internalError, invalidParams, methodNotFound,
+                              unsupportedProtocolVersion)
+import Effectful.MCP.Tool (Tool (..), errorResult, toolDefinition,
+                           toolResultValue)
+import Streamly.Data.Fold (drainMapM)
+import Streamly.Data.Stream (fold, unfoldrM)
+import Streamly.Data.Stream qualified as S (filter)
+import System.IO (hFlush, hSetBinaryMode, isEOF, stdin, stdout)
 
 -- | The stateless revision of the protocol this server speaks.
 protocolVersion :: Text
@@ -120,17 +128,17 @@ serverConfig info tools =
 serveStdio :: (IOE :> es, Concurrent :> es) => ServerConfig es -> Eff es ()
 serveStdio config = do
   liftIO $ do
-    IO.hSetBinaryMode IO.stdin True
-    IO.hSetBinaryMode IO.stdout True
+    hSetBinaryMode stdin True
+    hSetBinaryMode stdout True
   serve config readLine writeLine
   where
     readLine =
       liftIO $
-        IO.isEOF >>= \case
+        isEOF >>= \case
           True -> pure Nothing
-          False -> Just . stripReturn <$> Char8.hGetLine IO.stdin
-    stripReturn line = if Char8.isSuffixOf "\r" line then ByteString.init line else line
-    writeLine line = liftIO (Char8.hPutStrLn IO.stdout line >> IO.hFlush IO.stdout)
+          False -> Just . stripReturn <$> hGetLine stdin
+    stripReturn line = if isSuffixOf "\r" line then BS.init line else line
+    writeLine line = liftIO (hPutStrLn stdout line >> hFlush stdout)
 
 -- | A request being served: registered before it starts, so that its
 -- answer can tell whether it was cancelled meanwhile.
@@ -146,12 +154,12 @@ serve
   -> Eff es ()
 serve config readLine writeLine = do
   lock <- newMVar ()
-  running <- newTVarIO Map.empty
+  running <- newTVarIO M.empty
   -- Whether a client has selected the earlier revisions with initialize.
   legacy <- newTVarIO False
   let send line = withMVar lock (const (writeLine line))
-  Stream.fold (Fold.drainMapM (dispatch legacy running send)) $
-    Stream.filter (not . Char8.all (`elem` (" \t" :: String))) (Stream.unfoldrM (const (fmap (,()) <$> readLine)) ())
+  fold (drainMapM (dispatch legacy running send)) $
+    S.filter (not . BS8.all (`elem` (" \t" :: String))) (unfoldrM (const (fmap (,()) <$> readLine)) ())
   shutDown running
   where
     dispatch legacy running send line = case decodeIncoming line of
@@ -164,32 +172,32 @@ serve config readLine writeLine = do
           pure (if selected && not (carriesModernMeta params) then handleLegacyRequest else handleRequest)
         start running send requestId (era config method params)
       Notification "notifications/cancelled" params ->
-        forM_ (KeyMap.lookup "requestId" params >>= parseMaybe Aeson.parseJSON) (stop running)
+        forM_ (JK.lookup "requestId" params >>= parseMaybe parseJSON) (stop running)
       Notification _ _ -> pure ()
       Response -> pure ()
       Invalid requestId err -> send (encodeError requestId err)
 
     start running send requestId answerRequest = do
-      atomically (modifyTVar' running (Map.insert requestId (Running Nothing)))
+      atomically (modifyTVar' running (insert requestId (Running Nothing)))
       worker <- async $ do
         outcome <- trySync answerRequest
         let answer = case outcome of
               Right (Right result) -> encodeResult requestId result
               Right (Left err) -> encodeError (Just requestId) err
-              Left exception -> encodeError (Just requestId) (internalError (Text.pack (show exception)))
+              Left exception -> encodeError (Just requestId) (internalError (pack (show exception)))
         stillWanted <- atomically $ do
           current <- readTVar running
-          writeTVar running (Map.delete requestId current)
-          pure (Map.member requestId current)
+          writeTVar running (delete requestId current)
+          pure (M.member requestId current)
         if stillWanted then send answer else pure ()
       -- Record the thread, unless the request is already over.
-      atomically $ modifyTVar' running (Map.adjust (const (Running (Just worker))) requestId)
+      atomically $ modifyTVar' running (adjust (const (Running (Just worker))) requestId)
 
     stop running requestId = do
       entry <- atomically $ do
         current <- readTVar running
-        writeTVar running (Map.delete requestId current)
-        pure (Map.lookup requestId current)
+        writeTVar running (delete requestId current)
+        pure (M.lookup requestId current)
       forM_ entry $ \(Running worker) -> forM_ worker cancel
 
     -- Let the requests still running finish, within the grace period,
@@ -199,13 +207,13 @@ serve config readLine writeLine = do
       void (race (threadDelay config.shutdownGrace) (mapM_ waitCatch workers))
       readTVarIO running >>= mapM_ cancel . runningWorkers
 
-    runningWorkers current = [worker | Running (Just worker) <- Map.elems current]
+    runningWorkers current = [worker | Running (Just worker) <- elems current]
 
 -- | Whether a request carries the protocol version of the stateless
 -- revision, which makes it one of that revision whatever came before.
 carriesModernMeta :: Object -> Bool
-carriesModernMeta params = case KeyMap.lookup "_meta" params of
-  Just (Object meta) -> KeyMap.member "io.modelcontextprotocol/protocolVersion" meta
+carriesModernMeta params = case JK.lookup "_meta" params of
+  Just (Object meta) -> JK.member "io.modelcontextprotocol/protocolVersion" meta
   _ -> False
 
 -- | Answer one request of the earlier revisions: a result, or a protocol
@@ -223,7 +231,7 @@ handleLegacyRequest config method params = case method of
         <> catMaybes [("instructions" .=) <$> config.instructions]
   "ping" -> pure (Right (object []))
   "tools/list"
-    | KeyMap.member "cursor" params -> pure (Left (invalidParams "Unknown cursor: the list has one page"))
+    | JK.member "cursor" params -> pure (Left (invalidParams "Unknown cursor: the list has one page"))
     | otherwise -> pure (Right (object ["tools" .= map toolDefinition config.tools]))
   "tools/call" -> callToolWith object config params
   _ -> pure (Left (methodNotFound ("Method not found: " <> method)))
@@ -248,31 +256,31 @@ handleRequest config method params
                  ]
               <> catMaybes [("instructions" .=) <$> config.instructions]
         "tools/list"
-          | KeyMap.member "cursor" params -> pure (Left (invalidParams "Unknown cursor: the list has one page"))
+          | JK.member "cursor" params -> pure (Left (invalidParams "Unknown cursor: the list has one page"))
           | otherwise -> pure . Right . complete config $ ("tools" .= map toolDefinition config.tools) : cacheable config
         "tools/call" -> callToolWith (complete config) config params
         _ -> pure (Left (methodNotFound ("Method not found: " <> method)))
 
 -- | Call a tool, and wrap the fields of its result as a revision wants.
-callToolWith :: ([(Aeson.Key, Value)] -> Value) -> ServerConfig es -> Object -> Eff es (Either ErrorObject Value)
-callToolWith wrap config params = case KeyMap.lookup "name" params of
+callToolWith :: ([(Key, Value)] -> Value) -> ServerConfig es -> Object -> Eff es (Either ErrorObject Value)
+callToolWith wrap config params = case JK.lookup "name" params of
   Just (String toolName) -> case find (\candidate -> candidate.name == toolName) config.tools of
     Nothing -> pure (Left (invalidParams ("Unknown tool: " <> toolName)))
-    Just found -> case KeyMap.lookup "arguments" params of
-      Nothing -> run found (Object KeyMap.empty)
+    Just found -> case JK.lookup "arguments" params of
+      Nothing -> run found (Object JK.empty)
       Just arguments@(Object _) -> run found arguments
       Just _ -> pure (Left (invalidParams "arguments must be an object"))
   _ -> pure (Left (invalidParams "name must be a string"))
   where
     run found arguments = do
       outcome <- trySync (found.call arguments)
-      let result = either (\exception -> errorResult ("Internal error: " <> Text.pack (show exception))) id outcome
+      let result = either (\exception -> errorResult ("Internal error: " <> pack (show exception))) id outcome
       pure (Right (wrap (toolResultValue result)))
 
 -- | Check the fields every request must carry, and the version.
 checkMeta :: Object -> Either ErrorObject ()
-checkMeta params = case KeyMap.lookup "_meta" params of
-  Just (Object meta) -> case (KeyMap.lookup "io.modelcontextprotocol/protocolVersion" meta, KeyMap.lookup "io.modelcontextprotocol/clientCapabilities" meta) of
+checkMeta params = case JK.lookup "_meta" params of
+  Just (Object meta) -> case (JK.lookup "io.modelcontextprotocol/protocolVersion" meta, JK.lookup "io.modelcontextprotocol/clientCapabilities" meta) of
     (Just (String requested), Just (Object _))
       | requested == protocolVersion -> Right ()
       | otherwise -> Left (unsupportedProtocolVersion [protocolVersion] requested)
@@ -280,7 +288,7 @@ checkMeta params = case KeyMap.lookup "_meta" params of
     _ -> Left (invalidParams "Missing _meta.io.modelcontextprotocol/protocolVersion")
   _ -> Left (invalidParams "Missing _meta: in revision 2026-07-28 every request carries its protocol version; the earlier revisions start with initialize")
 
-complete :: ServerConfig es -> [(Aeson.Key, Value)] -> Value
+complete :: ServerConfig es -> [(Key, Value)] -> Value
 complete config fields =
   object $
     [ "resultType" .= ("complete" :: Text)
@@ -288,11 +296,11 @@ complete config fields =
     ]
       <> fields
 
-cacheable :: ServerConfig es -> [(Aeson.Key, Value)]
+cacheable :: ServerConfig es -> [(Key, Value)]
 cacheable config = ["ttlMs" .= config.cacheTtlMs, "cacheScope" .= ("public" :: Text)]
 
-stringField :: Aeson.Key -> Object -> Text
-stringField key fields = case KeyMap.lookup key fields of
+stringField :: Key -> Object -> Text
+stringField key fields = case JK.lookup key fields of
   Just (String text) -> text
   _ -> ""
 
