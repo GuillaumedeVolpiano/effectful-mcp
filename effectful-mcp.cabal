@@ -70,13 +70,13 @@ test-suite effectful-mcp-test
   main-is:        Main.hs
   ghc-options:    -threaded
   build-depends:
-    , aeson          ^>=2.3
-    , base           >=4.19 && <4.22
-    , bytestring     ^>=0.12
-    , effectful      ^>=2.7
-    , effectful-core ^>=2.7.1
+    , aeson
+    , base
+    , bytestring
+    , effectful
+    , effectful-core
     , effectful-mcp
     , stm            ^>=2.5
     , tasty          ^>=1.5
     , tasty-hunit    ^>=0.10
-    , text           ^>=2.1
+    , text
