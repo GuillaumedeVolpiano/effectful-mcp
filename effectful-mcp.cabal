@@ -3,9 +3,10 @@ name:            effectful-mcp
 version:         0.1.1.2
 synopsis:        Model Context Protocol servers in Effectful
 description:
-  A server of the Model Context Protocol (MCP), revision 2026-07-28, for
-  Effectful: declare tools as Eff actions, and serve them over stdio,
-  concurrently, with cancellation.
+  A server of the Model Context Protocol (MCP) for Effectful: declare tools
+  as Eff actions, and serve them over stdio, concurrently, with
+  cancellation. It speaks revision 2026-07-28 of the protocol and, to the
+  clients that only know them, the earlier ones.
 
 homepage:        https://github.com/GuillaumedeVolpiano/effectful-mcp
 license:         BSD-3-Clause

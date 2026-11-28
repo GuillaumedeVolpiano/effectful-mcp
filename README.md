@@ -6,12 +6,14 @@ A server of the [Model Context Protocol](https://modelcontextprotocol.io)
 `Eff` actions, and serve them over stdio.
 
 ```haskell
-import Data.Aeson
+{-# LANGUAGE OverloadedStrings #-}
+
+import Data.Aeson (FromJSON (parseJSON), object, withObject, (.:), (.=))
 import Data.Text (Text)
-import Effectful
+import Effectful (runEff)
 import Effectful.Concurrent (runConcurrent)
-import Effectful.MCP.Server
-import Effectful.MCP.Tool
+import Effectful.MCP.Server (implementation, serveStdio, serverConfig)
+import Effectful.MCP.Tool (textResult, tool, withArguments)
 
 newtype Greeting = Greeting Text
 
@@ -61,7 +63,8 @@ Requests run in threads of their own, forked as Effectful forks them: a tool
 that changes a local `State` changes its own copy. Use shared effects for
 state that must outlive a call.
 
-Tested with GHC 9.12.4, effectful 2.7.1, streamly-core 0.3.3.
+Tested with GHC 9.8.4, 9.10.3 and 9.12.4, effectful 2.7.1, streamly-core
+0.3.3.
 
 ## License
 
