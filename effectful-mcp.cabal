@@ -1,6 +1,6 @@
 cabal-version:   3.12
 name:            effectful-mcp
-version:         0.1.1.2
+version:         0.1.0.0
 synopsis:        Model Context Protocol servers in Effectful
 description:
   A server of the Model Context Protocol (MCP) for Effectful: declare tools
@@ -11,8 +11,8 @@ description:
 homepage:        https://github.com/GuillaumedeVolpiano/effectful-mcp
 license:         BSD-3-Clause
 license-file:    LICENSE
-author:          GuillaumedeVolpiano
-maintainer:      xavier@wheredoibegin.fr
+author:          Xavier Dectot
+maintainer:      Xavier Dectot <xavier@wheredoibegin.fr>
 category:        AI, Network, Control
 build-type:      Simple
 tested-with:     GHC ==9.8.4 || ==9.10.3 || ==9.12.4
